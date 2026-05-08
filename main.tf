@@ -1,4 +1,4 @@
-# Провайдер AWS
+# AWS Provider configuration
 terraform {
   required_version = ">= 1.5"
   required_providers {
@@ -14,13 +14,13 @@ provider "aws" {
   profile = "dtc"
 }
 
-# S3 бакет — аналог GCS bucket из видео
+# S3 bucket — equivalent of GCS bucket
 resource "aws_s3_bucket" "my_bucket" {
-  bucket        = var.bucket_name     # имя бакета должно быть глобально уникальным
-  force_destroy = true
+  bucket        = var.bucket_name     # bucket name must be globally unique
+  force_destroy = true                # allows deletion even if bucket is not empty
 }
 
-# Управление версионированием (в видео Storage Class и lifecycle)
+# Versioning — keeps multiple versions of each object
 resource "aws_s3_bucket_versioning" "versioning" {
   bucket = aws_s3_bucket.my_bucket.id
   versioning_configuration {
@@ -28,7 +28,7 @@ resource "aws_s3_bucket_versioning" "versioning" {
   }
 }
 
-# Жизненный цикл: удалять старые версии объектов через 7 дней (как в GCS lifecycle)
+# Lifecycle rule — delete noncurrent object versions after 7 days (similar to GCS lifecycle)
 resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
   bucket     = aws_s3_bucket.my_bucket.id
   depends_on = [aws_s3_bucket_versioning.versioning]
@@ -37,15 +37,15 @@ resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
     id     = "expire-old-versions"
     status = "Enabled"
 
-    filter {} # применяется ко всем объектам в бакете
+    filter {} # applies to all objects in the bucket
 
     noncurrent_version_expiration {
-      noncurrent_days = 1
+      noncurrent_days = 7
     }
   }
 }
 
-# Блокировка публичного доступа (по умолчанию включена, но зафиксируем явно)
+# Block all public access (explicitly enforced, even though it is the default)
 resource "aws_s3_bucket_public_access_block" "block_public" {
   bucket = aws_s3_bucket.my_bucket.id
 

@@ -1,295 +1,167 @@
-Ниже — полноценный туториал, повторяющий структуру видео из курса (основы Terraform + работа с облачным хранилищем), но полностью переведённый на AWS. Всё можно выполнить с нуля, имея только аккаунт AWS и консоль.
+# Terraform AWS S3 Bucket
+
+A Terraform configuration for provisioning an S3 bucket on AWS with versioning, lifecycle management, and public access blocking. This is an AWS equivalent of the GCS bucket setup from the Data Engineering Zoomcamp course.
 
 ---
 
-## Что мы сделаем
-- Создадим IAM-пользователя (аналог GCP Service Account) и получим ключи доступа
-- Установим Terraform и настроим AWS CLI
-- Напишем конфигурацию Terraform для создания S3-бакета
-- Выполним `terraform init`, `plan`, `apply` и `destroy`
-- Разберём управление состоянием и переменные
+## What This Creates
 
-Никаких лишних сервисов — только то, что нужно для первого знакомства с Terraform в AWS.
+- **S3 bucket** — private bucket with a globally unique name
+- **Versioning** — keeps multiple versions of each object
+- **Lifecycle rule** — automatically deletes noncurrent object versions after 7 days
+- **Public access block** — all public access is explicitly denied
 
 ---
 
-## 1. Подготовка окружения
+## Prerequisites
 
-### 1.1. Terraform
-Установите Terraform (версия ≥ 1.5) по [официальной инструкции](https://developer.hashicorp.com/terraform/downloads).  
-Проверка:
-```bash
-terraform version
-```
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.5
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) configured with a named profile `dtc`
 
-### 1.2. AWS CLI
-Установите AWS CLI и настройте профиль. В видео использовался локальный способ, мы поступим аналогично, но без сохранения секретов в открытом виде.
+### Configure AWS CLI profile
 
-Если у вас уже настроен дефолтный профиль для другого аккаунта и вы не хотите его перезаписать, используйте **named profile**:
 ```bash
 aws configure --profile dtc
 ```
-Это создаст отдельный профиль `dtc` в `~/.aws/credentials` и `~/.aws/config`, не затронув дефолтный аккаунт.
 
-Активировать профиль для текущей сессии терминала:
-```bash
-export AWS_PROFILE=dtc
-```
-После этого все команды AWS CLI и Terraform в этой сессии будут использовать профиль `dtc`.
-
-Либо передавать профиль явно в каждой команде:
-```bash
-aws s3 ls --profile dtc
-```
-
-Мы будем передавать ключи через переменные окружения, чтобы полностью контролировать аутентификацию в Terraform.
+You will be prompted for:
+- AWS Access Key ID
+- AWS Secret Access Key
+- Default region (e.g. `us-east-1`)
+- Output format (e.g. `json`)
 
 ---
 
-## 2. Создание IAM-пользователя (аналог Service Account)
+## 1. Create an IAM User (equivalent of GCP Service Account)
 
-В оригинале создавался Service Account с правами на Storage Object Admin. У нас будет IAM‑пользователь с политикой, позволяющей управлять S3.
+In the original course a GCP Service Account was created with Storage Object Admin permissions. The AWS equivalent is an IAM user with S3 access.
 
-### Через консоль AWS
-1. Перейдите в IAM → Users → Create user  
-2. Имя: `terraform-user` (или любое), отметьте **Programmatic access** (консольный доступ не нужен) — в новом интерфейсе это опция «Provide user access to the AWS Management Console» **выключена**, а ключи доступа генерируются позже.  
-3. Прикрепите политику `AmazonS3FullAccess` (для туториала достаточно; в реальности лучше сузить до одного бакета).  
-4. Завершите создание.  
-5. В карточке пользователя перейдите на вкладку **Security credentials** → **Create access key** → выберите **Application running outside AWS** → сохраните **Access Key ID** и **Secret Access Key**.
+### Via AWS Console
 
-### Экспорт ключей в терминал
-В каждой сессии терминала задайте переменные среды (как в видео экспортировались `GOOGLE_APPLICATION_CREDENTIALS`):
+1. Go to **IAM → Users → Create user**
+2. Set a name (e.g. `terraform-user`). Leave "Provide user access to the AWS Management Console" **unchecked** — programmatic access only.
+3. Attach the `AmazonS3FullAccess` policy (sufficient for this tutorial; in production, scope it down to a specific bucket).
+4. Finish creating the user.
+5. Open the user, go to **Security credentials → Create access key**, choose **Application running outside AWS**, and save the **Access Key ID** and **Secret Access Key**.
+
+### Export credentials to the terminal
+
+Similar to how `GOOGLE_APPLICATION_CREDENTIALS` was exported in the video, set environment variables for the current session:
+
 ```bash
-export AWS_ACCESS_KEY_ID="my_access_key"
-export AWS_SECRET_ACCESS_KEY="my_secret"
-export AWS_DEFAULT_REGION="us-east-1"   # регион по умолчанию
+export AWS_ACCESS_KEY_ID="your_access_key_id"
+export AWS_SECRET_ACCESS_KEY="your_secret_access_key"
+export AWS_DEFAULT_REGION="us-east-1"
 ```
-Теперь Terraform будет использовать их автоматически.
+
+Terraform will pick these up automatically. Alternatively, credentials are loaded from the `dtc` AWS CLI profile (`~/.aws/credentials`) — whichever is configured.
+
+> Never commit credentials to version control. The `.gitignore` in this project excludes credential files.
 
 ---
 
-## 3. Структура проекта
+## 2. Project Structure
 
-Создайте пустую папку для проекта, например `learn-terraform-aws`:
-```bash
-mkdir data_engineering_terraform-aws
-cd data_engineering_terraform-aws
 ```
-Создадим два файла:
-- `main.tf` – основная конфигурация
-- `variables.tf` – опциональные переменные (в видео переменная для названия бакета)
+.
+├── main.tf         # Main infrastructure configuration
+├── variables.tf    # Input variables
+├── outputs.tf      # Output values
+├── .gitignore      # Excludes state files, credentials, and .terraform/
+└── README.md
+```
 
 ---
 
-## 4. Конфигурация Terraform
+## 3. Usage
 
-### 4.1. `main.tf`
-```hcl
-# Провайдер AWS
-terraform {
-  required_version = ">= 1.5"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
+### Initialize
 
-provider "aws" {
-  region = var.region
-}
+Downloads the AWS provider and sets up the working directory:
 
-# S3 бакет — аналог GCS bucket из видео
-resource "aws_s3_bucket" "my_bucket" {
-  bucket = var.bucket_name     # имя бакета должно быть глобально уникальным
-}
-
-# Управление версионированием (в видео Storage Class и lifecycle)
-resource "aws_s3_bucket_versioning" "versioning" {
-  bucket = aws_s3_bucket.my_bucket.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-# Жизненный цикл: удалять старые версии объектов через 7 дней (как в GCS lifecycle)
-resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
-  bucket = aws_s3_bucket.my_bucket.id
-
-  rule {
-    id     = "expire-old-versions"
-    status = "Enabled"
-
-    noncurrent_version_expiration {
-      noncurrent_days = 7
-    }
-  }
-}
-
-# Блокировка публичного доступа (по умолчанию включена, но зафиксируем явно)
-resource "aws_s3_bucket_public_access_block" "block_public" {
-  bucket = aws_s3_bucket.my_bucket.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-```
-
-### 4.2. `variables.tf`
-```hcl
-variable "region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "bucket_name" {
-  description = "Globally unique S3 bucket name"
-  type        = string
-  default     = "my-first-terraform-bucket-20260508"  # замените на своё уникальное имя!
-  # Подсказка: можно использовать случайный суффикс, чтобы избежать конфликтов
-}
-```
-
-> В видео название бакета задаётся переменной с дефолтным значением — мы повторили тот же паттерн. При apply можно переопределить имя, подав `-var "bucket_name=..."`.
-
----
-
-## 5. Основные команды Terraform
-
-Полное повторение сценария из видео.
-
-### 5.1. `terraform init`
-Загружает провайдер AWS и инициализирует рабочую директорию:
 ```bash
 terraform init
 ```
-Будет создан `.terraform.lock.hcl`, фиксирующий версии провайдера.
 
-### 5.2. `terraform plan`
-Превью изменений без их применения:
+This creates `.terraform.lock.hcl` which pins the provider version.
+
+### Preview changes
+
+Shows what will be created without applying anything:
+
 ```bash
 terraform plan
 ```
-Вы увидите план создания S3-бакета, его версионирования, lifecycle и настроек публичного доступа.  
-Аналог «полусухого прогона» в GCP.
 
-### 5.3. `terraform apply`
-Запуск создания ресурсов:
+You will see a plan for creating the S3 bucket, versioning, lifecycle rule, and public access block — equivalent to the "dry run" shown in the video.
+
+### Apply
+
+Creates the resources in AWS:
+
 ```bash
 terraform apply
 ```
-Terraform снова покажет план и запросит подтверждение (yes/no). Это ровно как в видео.  
-После подтверждения в AWS будет создан бакет. Состояние (`terraform.tfstate`) сохранится локально в папке проекта.
 
-### 5.4. Проверка в консоли AWS
-Перейдите в S3 → Buckets, убедитесь, что бакет создан, версионирование включено, lifecycle rule присутствует. Можно загрузить тестовый файл и увидеть его версии.
+Terraform will show the plan again and ask for confirmation (`yes/no`). After confirmation, the bucket is created and state is saved locally in `terraform.tfstate`.
 
-### 5.5. `terraform destroy`
-Удаление всего, что было создано (тщательно используется в туториале):
+### Verify in AWS Console
+
+Go to **S3 → Buckets**, confirm the bucket was created, versioning is enabled, and the lifecycle rule is present. You can upload a test file and see its versions.
+
+### Destroy
+
+Removes all created resources:
+
 ```bash
 terraform destroy
 ```
-После подтверждения бакет и все ассоциированные ресурсы будут удалены из AWS.
+
+`force_destroy = true` is set on the bucket, so it will be deleted even if it contains objects.
 
 ---
 
-## 6. Важные замечания (параллели с видео)
+## 4. Variables
 
-- В оригинале состояние хранилось локально, что допустимо для обучения. В реальной работе на AWS настоятельно рекомендуется удалённый backend — S3-бакет + DynamoDB для блокировок (это буквально стандарт «S3 backend»). В видео это не затрагивается, но полезно знать на будущее.
-- В GCP использовался `google_storage_bucket_iam_binding`, у нас для простоты нет IAM политик на уровне бакета, но можно добавить политику доступа (например, сделать бакет приватным — он и так приватный по умолчанию).
-- Ключи доступа AWS экспортируются в переменные среды — аналог JSON-файла сервисного аккаунта. В production ключи лучше не хранить в открытом виде, а использовать AWS CLI credentials file или Vault.
-- Версионирование включено специально, чтобы продемонстрировать lifecycle rule (удаление неактуальных версий), как в видео был настроен lifecycle на удаление объектов через N дней. У нас — удаление старых версий через 7 дней.
+| Name          | Description                              | Default                         |
+|---------------|------------------------------------------|---------------------------------|
+| `region`      | AWS region where resources are created   | `us-east-1`                     |
+| `bucket_name` | Globally unique S3 bucket name           | `dtc-terraform-bucket-20260508` |
 
----
+Override variables at apply time:
 
-## 7. Файлы проекта (всё вместе)
-
-```
-data_engineering_terraform-aws/
-├── main.tf
-├── variables.tf
-└── .terraform/            (появится после init)
-```
-
-Полный код для копирования:
-
-**main.tf**
-```hcl
-terraform {
-  required_version = ">= 1.5"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
-
-provider "aws" {
-  region = var.region
-}
-
-resource "aws_s3_bucket" "my_bucket" {
-  bucket = var.bucket_name
-}
-
-resource "aws_s3_bucket_versioning" "versioning" {
-  bucket = aws_s3_bucket.my_bucket.id
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
-  bucket = aws_s3_bucket.my_bucket.id
-
-  rule {
-    id     = "expire-old-versions"
-    status = "Enabled"
-
-    noncurrent_version_expiration {
-      noncurrent_days = 7
-    }
-  }
-}
-
-resource "aws_s3_bucket_public_access_block" "block_public" {
-  bucket = aws_s3_bucket.my_bucket.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-```
-
-**variables.tf**
-```hcl
-variable "region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "bucket_name" {
-  description = "Globally unique S3 bucket name"
-  type        = string
-  default     = "my-first-terraform-bucket-20260508"
-}
+```bash
+terraform apply -var "bucket_name=my-custom-bucket-name"
 ```
 
 ---
 
-## Итог
+## 5. Outputs
 
-Вы получили прямое пошаговое воспроизведение видео‑туториала на AWS:
-- локальная аутентификация через ключи IAM-пользователя
-- создание инфраструктуры из terraform-конфигурации
-- полный цикл init → plan → apply → destroy
-- управление версиями и жизненным циклом объектов S3
+| Name            | Description                              |
+|-----------------|------------------------------------------|
+| `bucket_name`   | The name of the created S3 bucket        |
+| `bucket_arn`    | The ARN of the S3 bucket                 |
+| `bucket_region` | The AWS region where the bucket resides  |
 
-Теперь вы можете продолжить экспериментировать: добавить `aws_s3_object` для загрузки файлов из Terraform, внедрить remote state на S3, или перенести IAM-политику на конкретный бакет. Удачи!
+---
+
+## 6. Parallels with the Course Video
+
+| GCP (video)                        | AWS (this project)                              |
+|------------------------------------|-------------------------------------------------|
+| GCS bucket                         | S3 bucket                                       |
+| Service Account + JSON key         | IAM user + Access Key / AWS CLI profile         |
+| `GOOGLE_APPLICATION_CREDENTIALS`   | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`   |
+| Storage Class                      | S3 storage class (Standard by default per object)|
+| Lifecycle rule (delete after N days)| `noncurrent_version_expiration` after 7 days   |
+| Local state                        | Local `terraform.tfstate` (same approach)       |
+
+---
+
+## 7. Notes
+
+- **Storage class** is not set at the bucket level in S3 — it is assigned per object at upload time. The default is `STANDARD`.
+- **State** is stored locally (`terraform.tfstate`). For production, use a [remote S3 backend](https://developer.hashicorp.com/terraform/language/settings/backends/s3) with DynamoDB for state locking — this is the AWS standard equivalent of a GCS remote backend.
+- **`force_destroy = true`** makes `terraform destroy` work even if the bucket is not empty. Remove this in production environments.
+- **Versioning + lifecycle** work together: versioning keeps old object versions, and the lifecycle rule cleans them up after 7 days — mirroring the lifecycle configuration shown in the video.
