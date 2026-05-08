@@ -16,7 +16,8 @@ provider "aws" {
 
 # S3 бакет — аналог GCS bucket из видео
 resource "aws_s3_bucket" "my_bucket" {
-  bucket = var.bucket_name     # имя бакета должно быть глобально уникальным
+  bucket        = var.bucket_name     # имя бакета должно быть глобально уникальным
+  force_destroy = true
 }
 
 # Управление версионированием (в видео Storage Class и lifecycle)
@@ -29,7 +30,8 @@ resource "aws_s3_bucket_versioning" "versioning" {
 
 # Жизненный цикл: удалять старые версии объектов через 7 дней (как в GCS lifecycle)
 resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
-  bucket = aws_s3_bucket.my_bucket.id
+  bucket     = aws_s3_bucket.my_bucket.id
+  depends_on = [aws_s3_bucket_versioning.versioning]
 
   rule {
     id     = "expire-old-versions"
@@ -38,7 +40,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "lifecycle" {
     filter {} # применяется ко всем объектам в бакете
 
     noncurrent_version_expiration {
-      noncurrent_days = 7
+      noncurrent_days = 1
     }
   }
 }
